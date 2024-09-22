@@ -25,8 +25,8 @@ struct {
 SEC("xdp")
 int  xdp_stats1_func(struct xdp_md *ctx)
 {
-	// void *data_end = (void *)(long)ctx->data_end;
-	// void *data     = (void *)(long)ctx->data;
+	void *data_end = (void *)(long)ctx->data_end;
+	void *data     = (void *)(long)ctx->data;
 	struct datarec *rec;
 	__u32 key = XDP_PASS; /* XDP_PASS = 2 */
 
@@ -42,7 +42,7 @@ int  xdp_stats1_func(struct xdp_md *ctx)
 	/* Multiple CPUs can access data record. Thus, the accounting needs to
 	 * use an atomic operation.
 	 */
-	lock_xadd(&rec->rx_packets, 1);
+	//lock_xadd(&rec->rx_packets, 1);
         /* Assignment#1: Add byte counters
          * - Hint look at struct xdp_md *ctx (copied below)
          *
@@ -50,6 +50,10 @@ int  xdp_stats1_func(struct xdp_md *ctx)
          * - Hint there is a map type named BPF_MAP_TYPE_PERCPU_ARRAY
          */
 
+	__u64 bytes = (char *)data_end - (char *)data;
+	rec->rx_bytes += bytes;
+	++rec->rx_packets;
+	
 	return XDP_PASS;
 }
 
