@@ -51,20 +51,20 @@ static __always_inline int vlan_tag_pop(struct xdp_md *ctx, struct ethhdr *eth)
 
 	/* Actually adjust the head pointer */
 
-	data = vlh;
-
 	int err = bpf_xdp_adjust_head(ctx, sizeof(*vlh));
 
 	if (err != 0)
 		return err;
+
+	data = (void *)(long)ctx->data;
 	/* Need to re-evaluate data *and* data_end and do new bounds checking
 	 * after adjusting head
 	 */
 
-	if (ctx->data + sizeof(eth_cpy) > data_end)
+	if (data + sizeof(eth_cpy) > data_end)
 		return -1;
 
-	memcpy(ctx->data, &eth_cpy, sizeof(eth_cpy));
+	memcpy(data, &eth_cpy, sizeof(eth_cpy));
 	/* Copy back the old Ethernet header and update the proto type */
 
 	return vlid;
@@ -77,27 +77,28 @@ static __always_inline int vlan_tag_push(struct xdp_md *ctx,
 										 struct ethhdr *eth, int vlid)
 {
 	void *data_end = (void *)(long)ctx->data_end;
+	void *data = (void *)(long)ctx->data;
 	struct ethhdr eth_cpy;
-	struct vlan_hdr *vlh;
-	__be16 h_proto;
+	struct vlan_hdr *vlh = {0};
 
 	vlh->h_vlan_TCI = bpf_htons(vlid);
 
-	if (ctx->data + sizeof(*eth) > data_end)
+	if (data + sizeof(*eth) > data_end)
 		return -1;
 
-	memcpy(&eth_cpy, ctx->data, sizeof(struct ethhdr));
+	memcpy(&eth_cpy, data, sizeof(struct ethhdr));
 
-	int err = bpf_xdp_adjust_head(ctx, -sizeof(*vlh));
+	int err = bpf_xdp_adjust_head(ctx, (int) -sizeof(*vlh));
 
 	if (err != 0)
 		return err;
 
-	if (ctx->data + sizeof(eth_cpy) + sizeof(*vlh) > data_end)
+	data = (void *)(long)ctx->data;
+	if (data + sizeof(eth_cpy) + sizeof(*vlh) > data_end)
 		return -1;
 
-	memcpy(ctx->data, &eth_cpy, sizeof(eth_cpy));
-	memcpy(ctx->data + sizeof(eth_cpy), vlh, sizeof(*vlh));
+	memcpy(data, &eth_cpy, sizeof(eth_cpy));
+	memcpy(data + sizeof(eth_cpy), vlh, sizeof(*vlh));
 
 	return 0;
 }
