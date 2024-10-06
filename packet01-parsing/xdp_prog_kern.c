@@ -177,7 +177,6 @@ static __always_inline int parse_icmphdr(struct hdr_cursor *nh,
 	return hdr->type;
 }
 
-
 SEC("xdp")
 int xdp_parser_func(struct xdp_md *ctx)
 {
@@ -207,42 +206,49 @@ int xdp_parser_func(struct xdp_md *ctx)
 	 * header type in the packet correct?), and bounds checking.
 	 */
 	nh_type = parse_ethhdr(&nh, data_end, &eth);
-	if (nh_type != bpf_htons(ETH_P_IPV6)) {
-		action = XDP_ABORTED;
-		goto out;
-	}
 
 	int ip_type, icmp_type;
 
-	if (nh_type == bpf_htons(ETH_P_IP)) {
+	if (nh_type == bpf_htons(ETH_P_IP))
+	{
 		ip_type = parse_iphdr(&nh, data_end, &iphdr);
-	} else if (nh_type == bpf_htons(ETH_P_IPV6)) {
+	}
+	else if (nh_type == bpf_htons(ETH_P_IPV6))
+	{
 		ip_type = parse_ip6hdr(&nh, data_end, &ipv6hdr);
-	} else {
-		action = XDP_ABORTED;
+	}
+	else
+	{
 		goto out;
 	}
 
-	if (ip_type == bpf_htons(IPPROTO_ICMP)) {
+	if (ip_type == IPPROTO_ICMP)
+	{
 		icmp_type = parse_icmphdr(&nh, data_end, &icmphdr);
-		if (icmp_type == bpf_htons(ICMP_ECHO) 
-		&& (bpf_ntohs(icmphdr->un.echo.sequence) % 2 == 0)) {
+		if (icmp_type == ICMP_ECHO 
+		&& bpf_ntohs(icmphdr->un.echo.sequence) % 2 == 0)
+		{
 			action = XDP_DROP;
 			goto out;
 		}
-	} else if (ip_type == bpf_htons(IPPROTO_ICMPV6)) {
+	}
+	else if (ip_type == IPPROTO_ICMPV6)
+	{
 		icmp_type = parse_icmp6hdr(&nh, data_end, &icmp6hdr);
-		if (icmp_type == bpf_htons(ICMP_ECHO)
-		&& (bpf_ntohs(icmp6hdr->icmp6_dataun.u_echo.sequence) % 2 == 0)) {
+		if (icmp_type == ICMPV6_ECHO_REQUEST 
+		&& bpf_ntohs(icmp6hdr->icmp6_dataun.u_echo.sequence) % 2 == 0)
+		{
 			action = XDP_DROP;
 			goto out;
 		}
-	} else {
+	}
+	else
+	{
 		goto out;
 	}
-		/* Assignment additions go below here */
+	/* Assignment additions go below here */
 
-		action = XDP_DROP;
+	//action = XDP_DROP;
 out:
 	return xdp_stats_record_action(ctx, action); /* read via xdp_stats */
 }
