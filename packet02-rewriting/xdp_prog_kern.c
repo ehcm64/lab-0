@@ -11,35 +11,61 @@
 #include "../common/xdp_stats_kern_user.h"
 #include "../common/xdp_stats_kern.h"
 
+#ifndef memcpy
+#define memcpy(dest, src, n) __builtin_memcpy((dest), (src), (n))
+#endif
+
 /* Pops the outermost VLAN tag off the packet. Returns the popped VLAN ID on
  * success or -1 on failure.
  */
 static __always_inline int vlan_tag_pop(struct xdp_md *ctx, struct ethhdr *eth)
 {
-	/*
+
 	void *data_end = (void *)(long)ctx->data_end;
+	void *data = (void *)(long)ctx->data;
 	struct ethhdr eth_cpy;
 	struct vlan_hdr *vlh;
 	__be16 h_proto;
-	*/
+
 	int vlid = -1;
+
+	data += sizeof(*eth);
+	memcpy(&eth_cpy, eth, sizeof(*eth));
+	vlh = data;
+	h_proto = eth->h_proto;
 
 	/* Check if there is a vlan tag to pop */
 
+	if (!proto_is_vlan(h_proto))
+		return vlid;
+
 	/* Still need to do bounds checking */
+	if (vlh + 1 > data_end)
+		return -1;
 
 	/* Save vlan ID for returning, h_proto for updating Ethernet header */
+	h_proto = vlh->h_vlan_encapsulated_proto;
+	vlid = bpf_ntohs(vlh->h_vlan_TCI) & VLAN_VID_MASK;
 
 	/* Make a copy of the outer Ethernet header before we cut it off */
 
 	/* Actually adjust the head pointer */
 
+	data = vlh;
+
+	int err = bpf_xdp_adjust_head(ctx, sizeof(*vlh));
+
+	if (err != 0)
+		return err;
 	/* Need to re-evaluate data *and* data_end and do new bounds checking
 	 * after adjusting head
 	 */
 
-	/* Copy back the old Ethernet header and update the proto type */
+	if (ctx->data + sizeof(eth_cpy) > data_end)
+		return -1;
 
+	memcpy(ctx->data, &eth_cpy, sizeof(eth_cpy));
+	/* Copy back the old Ethernet header and update the proto type */
 
 	return vlid;
 }
@@ -48,8 +74,31 @@ static __always_inline int vlan_tag_pop(struct xdp_md *ctx, struct ethhdr *eth)
  * -1 on failure.
  */
 static __always_inline int vlan_tag_push(struct xdp_md *ctx,
-					 struct ethhdr *eth, int vlid)
+										 struct ethhdr *eth, int vlid)
 {
+	void *data_end = (void *)(long)ctx->data_end;
+	struct ethhdr eth_cpy;
+	struct vlan_hdr *vlh;
+	__be16 h_proto;
+
+	vlh->h_vlan_TCI = bpf_htons(vlid);
+
+	if (ctx->data + sizeof(*eth) > data_end)
+		return -1;
+
+	memcpy(&eth_cpy, ctx->data, sizeof(struct ethhdr));
+
+	int err = bpf_xdp_adjust_head(ctx, -sizeof(*vlh));
+
+	if (err != 0)
+		return err;
+
+	if (ctx->data + sizeof(eth_cpy) + sizeof(*vlh) > data_end)
+		return -1;
+
+	memcpy(ctx->data, &eth_cpy, sizeof(eth_cpy));
+	memcpy(ctx->data + sizeof(eth_cpy), vlh, sizeof(*vlh));
+
 	return 0;
 }
 
@@ -57,7 +106,65 @@ static __always_inline int vlan_tag_push(struct xdp_md *ctx,
 SEC("xdp")
 int xdp_port_rewrite_func(struct xdp_md *ctx)
 {
-	return XDP_PASS;
+	int action = XDP_PASS;
+	int eth_type, ip_type;
+	struct ethhdr *eth;
+	struct iphdr *iphdr;
+	struct ipv6hdr *ipv6hdr;
+	struct udphdr *udphdr;
+	struct tcphdr *tcphdr;
+	void *data_end = (void *)(long)ctx->data_end;
+	void *data = (void *)(long)ctx->data;
+	struct hdr_cursor nh = {.pos = data};
+
+	eth_type = parse_ethhdr(&nh, data_end, &eth);
+	if (eth_type < 0)
+	{
+		action = XDP_ABORTED;
+		goto out;
+	}
+
+	if (eth_type == bpf_htons(ETH_P_IP))
+	{
+		ip_type = parse_iphdr(&nh, data_end, &iphdr);
+	}
+	else if (eth_type == bpf_htons(ETH_P_IPV6))
+	{
+		ip_type = parse_ip6hdr(&nh, data_end, &ipv6hdr);
+	}
+	else
+	{
+		goto out;
+	}
+
+	if (ip_type == IPPROTO_UDP)
+	{
+		if (parse_udphdr(&nh, data_end, &udphdr) < 0)
+		{
+			action = XDP_ABORTED;
+			goto out;
+		}
+
+		udphdr->dest = bpf_htons(bpf_ntohs(udphdr->dest) - 1);
+		udphdr->check += bpf_htons(1);
+		if (!udphdr->check)
+			udphdr->check += bpf_htons(1);
+	}
+	else if (ip_type == IPPROTO_TCP)
+	{
+		if (parse_tcphdr(&nh, data_end, &tcphdr) < 0)
+		{
+			action = XDP_ABORTED;
+			goto out;
+		}
+		tcphdr->dest = bpf_htons(bpf_ntohs(tcphdr->dest) - 1);
+		tcphdr->check += bpf_htons(1);
+		if (!tcphdr->check)
+			tcphdr->check += bpf_htons(1);
+	}
+
+out:
+	return xdp_stats_record_action(ctx, action);
 }
 
 /* VLAN swapper; will pop outermost VLAN tag if it exists, otherwise push a new
@@ -92,7 +199,7 @@ int xdp_vlan_swap_func(struct xdp_md *ctx)
  * IP (via the helpers in parsing_helpers.h).
  */
 SEC("xdp")
-int  xdp_parser_func(struct xdp_md *ctx)
+int xdp_parser_func(struct xdp_md *ctx)
 {
 	void *data_end = (void *)(long)ctx->data_end;
 	void *data = (void *)(long)ctx->data;
@@ -116,7 +223,8 @@ int  xdp_parser_func(struct xdp_md *ctx)
 	 */
 	nh_type = parse_ethhdr(&nh, data_end, &eth);
 
-	if (nh_type == bpf_htons(ETH_P_IPV6)) {
+	if (nh_type == bpf_htons(ETH_P_IPV6))
+	{
 		struct ipv6hdr *ip6h;
 		struct icmp6hdr *icmp6h;
 
@@ -130,8 +238,9 @@ int  xdp_parser_func(struct xdp_md *ctx)
 
 		if (bpf_ntohs(icmp6h->icmp6_sequence) % 2 == 0)
 			action = XDP_DROP;
-
-	} else if (nh_type == bpf_htons(ETH_P_IP)) {
+	}
+	else if (nh_type == bpf_htons(ETH_P_IP))
+	{
 		struct iphdr *iph;
 		struct icmphdr *icmph;
 
@@ -146,7 +255,7 @@ int  xdp_parser_func(struct xdp_md *ctx)
 		if (bpf_ntohs(icmph->un.echo.sequence) % 2 == 0)
 			action = XDP_DROP;
 	}
- out:
+out:
 	return xdp_stats_record_action(ctx, action);
 }
 
